@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# coding=utf-8
+
+{% include 'header.j2' %}
+
+# make sure this script runs at the repo root
+cd "$(dirname "$(realpath -e "$0")")"/../../..
+REPO_ROOT="$PWD"
+
+set -mveuo pipefail
+
+export TEST=$1
+source .ci/compose/scripts/utils.sh
+
+export POST_INSTALL=$PWD/.ci/compose/scripts/post_install.sh
+
+# This sets the project name for the compose command
+export COMPOSE_PROJECT_NAME=$(project_name)
+export PULP_API_ROOT="/pulp/"
+if [ "$TEST" = "s3" ]; then
+  # TODO: tie this into test_reroute, remove or find a way to extract the value from the test_scenario_settings
+  export PULP_API_ROOT="/rerouted/djnd/"
+fi
+
+PLUGIN_VERSION="$(bump-my-version show current_version | tail -n -1 | python -c 'from packaging.version import Version; print(Version(input()))')"
+PACKAGE_WHEEL="{{ plugin_name | snake }}-${PLUGIN_VERSION}-py3-none-any.whl"
+CLIENT_WHEELS="pulpcore_client-*-py3-none-any.whl pulp_file_client-*-py3-none-any.whl pulp_certguard_client-*-py3-none-any.whl"
+{%- for plugin in plugins if plugin.app_label not in ["core", "file", "certguard"] %}
+CLIENT_WHEELS="${CLIENT_WHEELS} ${{ plugin.app_label }}_client-*-py3-none-any.whl"
+{%- endfor %}
+{% if plugin_name == "pulpcore" %}
+FULL_INSTALL="${PACKAGE_WHEEL}"
+{% else %}
+FULL_INSTALL="pulpcore"
+{% endif %}
+COMPOSE_FILES="-f .ci/compose/compose.yaml"
+if [ "$TEST" = "s3" ]; then
+  FULL_INSTALL="${FULL_INSTALL}[s3]"
+  COMPOSE_FILES="${COMPOSE_FILES} -f .ci/compose/s3/compose.s3.yaml"
+fi
+if [ "$TEST" = "azure" ]; then
+  FULL_INSTALL="${FULL_INSTALL}[azure]"
+  COMPOSE_FILES="${COMPOSE_FILES} .ci/compose/azure/compose.azure.yaml"
+fi
+{% if plugin_name != "pulpcore" %}
+FULL_INSTALL="${FULL_INSTALL} ${PACKAGE_WHEEL}"
+{% endif %}
+
+export FULL_INSTALL="${FULL_INSTALL} ${CLIENT_WHEELS} -r test_requirements.txt -c constraints.txt"
+export PACKAGE_SRC="dist/${PACKAGE_WHEEL}"
+export CORE_CLIENT_SRC=".ci/compose/${TEST}/pulpcore_client-*-py3-none-any.whl"
+export FILE_CLIENT_SRC=".ci/compose/${TEST}/pulp_file_client-*-py3-none-any.whl"
+export CERTGUARD_CLIENT_SRC=".ci/compose/${TEST}/pulp_certguard_client-*-py3-none-any.whl"
+{%- for plugin in plugins if plugin.app_label not in ["core", "file", "certguard"] %}
+export ${{ plugin.app_label }}_CLIENT_SRC=".ci/compose/${TEST}/$({{ plugin.app_label }}_client-*-py3-none-any.whl"
+{%- endfor %}
+
+# EXTRA_INSTALL comment
+# Always do a fresh build of the images
+compose_cmd ${COMPOSE_FILES} build
+# Start the services
+compose_cmd ${COMPOSE_FILES} up -d --wait
+# Reset the admin password
+cmd_prefix pulpcore-manager reset-admin-password --password password
+
+# Build the pulp-cli image with the SSL cert built in
+compose_cmd cp pulp:/etc/pulp/certs/pulp_webserver.crt .ci/compose/${TEST}/pulp_webserver.crt
+export CLI_VERSION=$(pip index versions --json pulp-cli | jq -r '.latest')
+$CONTAINER_EXEC build -f .ci/compose/cli.Containerfile -t localhost/pulp-cli:${COMPOSE_PROJECT_NAME} --build-arg CLI_VERSION=${CLI_VERSION} --build-arg PULP_API_ROOT=${PULP_API_ROOT} --build-arg TEST=${TEST} .ci/compose
+
+if [ "$TEST" = "s3" ]; then
+  compose_cmd exec minio bash -c "mc alias set s3 http://minio:9000 AKIAIT2Z5TDYPX3ARJBA fqRvjWaPU5o0fCqQuUWbj9Fainj2pVZtBCiDiieS --api S3v4"
+  compose_cmd exec minio bash -c "mc mb s3/pulp3"
+fi
+
+# Disable redis on S3
+if [ "$TEST" = "s3" ]; then
+  cmd_prefix s6-rc -d change redis
+fi
+
+if [[ "$TEST" = "azure" ]]; then
+  AZURE_STORAGE_CONNECTION_STRING='DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://ci-azurite:10000/devstoreaccount1;'
+  compose_cmd exec azurite bash -c "az storage container create --name pulp-test --connection-string $AZURE_STORAGE_CONNECTION_STRING"
+fi
+
+echo ::group::PIP_LIST
+cmd_prefix bash -c "pip3 list"
+echo ::endgroup::

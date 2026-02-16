@@ -1,0 +1,102 @@
+{% include 'header.j2' %}
+{% from 'macros.j2' import
+  checkout,
+  setup_python,
+  install_python_deps,
+  run_script,
+with context %}
+---
+name: "Build"
+on:
+  workflow_call:
+
+defaults:
+  run:
+    working-directory: "{{ plugin_name }}"
+
+jobs:
+  build:
+    runs-on: "ubuntu-latest"
+
+    steps:
+      {{ checkout(path=plugin_name) | indent(6) }}
+      {{ checkout(repository="pulp/pulp-openapi-generator", path="pulp-openapi-generator") | indent(6) }}
+      {{ setup_python() | indent(6) }}
+      {{ install_python_deps(["build", "packaging", "twine", "wheel", "mkdocs", "jq"]) | indent(6) }}
+      {%- if os_required_packages %}
+      - name: "Install OS packages"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y {{ os_required_packages|join(' ') }}
+      {%- endif %}
+      - name: "Build package"
+        run: |
+          make build
+      - name: "Install built packages"
+        run: |
+          pip install dist/{{ plugin_name | snake }}-*-py3-none-any.whl -c .ci/assets/ci_constraints.txt
+      - name: "Generate api specs"
+        run: |
+          pulpcore-manager openapi --file "api.json"
+          make openapi
+          make openapi TEST="azure"
+          make openapi TEST="s3"
+          make openapi TEST="lowerbounds"
+      - name: "Upload Package whl"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "plugin_package"
+          path: "{{ plugin_name }}/dist/"
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+      - name: "Upload API specs"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "api_spec"
+          path: |
+            {{ plugin_name }}.ci/compose/*/*api.json
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+      - name: "Build Python bindings packages"
+        run: |
+          make bindings TEST="pulp"
+          make bindings TEST="azure"
+          make bindings TEST="s3"
+          make bindings TEST="lowerbounds"
+          # Only need to build docs for the pulp test.
+          make bindings-docs TEST="pulp"
+      - name: "Upload python client packages"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "python-client.tar"
+          path: |
+            {{ plugin_name }}.ci/compose/*/*client-*
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+      - name: "Upload python client docs"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "python-client-docs.tar"
+          path: |
+            {{ plugin_name }}.ci/compose/*/*-python-client-docs.tar
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+      {%- if deploy_client_to_rubygems %}
+      - name: "Build Ruby bindings packages"
+        run: |
+          make bindings TEST="pulp" TYPE="ruby"
+      - name: "Upload Ruby client"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "ruby-client.tar"
+          path: |
+            {{ plugin_name }}.ci/compose/*/*-ruby-client.tar
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+      {%- endif %}
+...

@@ -1,0 +1,86 @@
+{% include 'header.j2' %}
+{% from 'macros.j2' import
+  checkout,
+  display_logs,
+  install_python_deps,
+  run_script,
+  setup_env,
+  setup_python,
+with context %}
+---
+name: "Test"
+on:
+  workflow_call:
+    inputs:
+      matrix_env:
+        required: true
+        type: string
+
+defaults:
+  run:
+    working-directory: "{{ plugin_name }}"
+
+jobs:
+  test:
+    runs-on: "ubuntu-latest"
+    strategy:
+      fail-fast: false
+      matrix:
+        {%- raw %}
+        env: ${{ fromJSON(inputs.matrix_env) }}
+        {%- endraw %}
+
+    steps:
+      {{ checkout(path=plugin_name) | indent(6) }}
+
+      {{ setup_python() | indent(6) }}
+
+      - name: "Download plugin package"
+        uses: "actions/download-artifact@v4"
+        with:
+          name: "plugin_package"
+          path: "{{ plugin_name }}/dist/"
+
+      - name: "Download API specs"
+        uses: "actions/download-artifact@v4"
+        with:
+          name: "api_spec"
+          path: "{{ plugin_name }}/.ci/compose/"
+
+      - name: "Download client packages"
+        uses: "actions/download-artifact@v4"
+        with:
+          name: "python-client.tar"
+          path: "{{ plugin_name }}.ci/compose/"
+
+      {{ install_python_deps(["build", "towncrier", "twine", "wheel", "httpie",  "mkdocs", "jsonpatch", "bump-my-version"]) | indent(6) }}
+
+      {{ setup_env() | indent(6) }}
+
+      - name: "Setup"
+        run: |
+          make test-setup TEST="{% raw %}${{ matrix.env.TEST }}{% endraw %}"
+
+      - name: "Install"
+        run: |
+          make test-install TEST="{% raw %}${{ matrix.env.TEST }}{% endraw %}"
+
+      - name: "Test"
+        run: |
+          make test TEST="{% raw %}${{ matrix.env.TEST }}{% endraw %}"
+
+      - name: "Extract Deprecations from Logs"
+        run: |
+          make test-logs TEST="{% raw %}${{ matrix.env.TEST }}{% endraw %}" 2>&1 | grep -i pulpcore.deprecation | tee deprecations-{% raw %}${{ matrix.env.TEST }}{% endraw %}.txt
+
+      - name: "Upload Deprecations"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "deprecations-{% raw %}${{ matrix.env.TEST }}{% endraw %}"
+          path: "{{ plugin_name }}/deprecations-{% raw %}${{ matrix.env.TEST }}{% endraw %}.txt"
+          if-no-files-found: "error"
+          retention-days: 5
+          overwrite: true
+
+      {{ display_logs() | indent(6) }}
+...

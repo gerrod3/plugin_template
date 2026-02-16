@@ -1,0 +1,49 @@
+FROM {{ ci_base_image | default("ghcr.io/pulp/pulp-ci-centos9:latest") }}
+
+ARG EXTRA_INSTALL
+RUN if [ -n "$EXTRA_INSTALL" ]; then \
+    dnf install -y $EXTRA_INSTALL; \
+fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --upgrade pip setuptools wheel
+
+# Build context is the root of the project
+{% for item in extra_files | default([]) %}
+COPY {{ item.origin }} {{ item.destination }}
+{% endfor %}
+COPY unittest_requirements.txt functest_requirements.txt /
+
+ARG PACKAGE_SRC
+COPY $PACKAGE_SRC /
+
+# Now copy test runner specific files
+ARG TEST CORE_CLIENT_SRC FILE_CLIENT_SRC CERTGUARD_CLIENT_SRC
+{% for item in plugins if item.app_label not in ["core", "file", "certguard"] %}
+ARG ${{ item.app_label }}_CLIENT_SRC
+COPY ${{ item.app_label }}_CLIENT_SRC /
+{% endfor %}
+COPY .ci/compose/$TEST/settings.py /etc/pulp/settings.py
+COPY .ci/compose/$TEST/constraints.txt /constraints.txt
+COPY $CORE_CLIENT_SRC $FILE_CLIENT_SRC $CERTGUARD_CLIENT_SRC /
+
+# Now install everything
+ARG FULL_INSTALL
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install $FULL_INSTALL
+
+USER pulp:pulp
+RUN PULP_STATIC_ROOT=/var/lib/operator/static/ PULP_CONTENT_ORIGIN=localhost \
+       /usr/local/bin/pulpcore-manager collectstatic --clear --noinput --link
+{% for item in plugins %}
+RUN export plugin_path="$(pip3 show {{ item.name }} | sed -n -e 's/Location: //p')/{{ item.name }}" && \
+    ln $plugin_path/app/webserver_snippets/nginx.conf /etc/nginx/pulp/{{ item.name }}.conf || true
+{% endfor %}
+# Needed for tests
+RUN echo 'machine pulp login admin password password' > ~pulp/.netrc
+USER root:root
+RUN echo '%wheel        ALL=(ALL)       NOPASSWD: ALL' > /etc/sudoers.d/nopasswd && \
+    mkdir /.pytest_cache && \
+    usermod -a -G wheel pulp && \
+    chmod 600 ~pulp/.netrc
+    # cat /etc/pulp/certs/pulp_webserver.crt >> $(python3 -c 'import certifi; print(certifi.where())')

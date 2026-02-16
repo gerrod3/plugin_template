@@ -1,0 +1,30 @@
+name: "{{ plugin_name | camel }}.CI"
+
+services:
+  pulp:
+    build:
+      context: ../..
+      dockerfile: ".ci/compose/Containerfile"
+      args:
+        - EXTRA_INSTALL
+        - PACKAGE_SRC
+        - CORE_CLIENT_SRC
+        - FILE_CLIENT_SRC
+        - CERTGUARD_CLIENT_SRC
+        {%- for item in plugins if item.app_label not in ["core", "file", "certguard"] %}
+        - {{ item.app_label }}_CLIENT_SRC
+        {%- endfor %}
+        - FULL_INSTALL
+        - TEST
+    image: "localhost/pulp-ci:${COMPOSE_PROJECT_NAME}"
+    ports:
+      - "8122:443"
+    healthcheck:
+      test: "curl -f http://localhost:24817${PULP_API_ROOT:-/pulp/}api/v3/status/"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      PULP_WORKERS: "4"
+      PULP_HTTPS: "true"
+      PULP_CA_BUNDLE: "/etc/pulp/certs/pulp_webserver.crt"

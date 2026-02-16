@@ -1,0 +1,81 @@
+{% include 'header.j2' %}
+
+set -mxeuo pipefail
+
+# make sure this script runs at the repo root
+cd "$(dirname "$(realpath -e "$0")")"/../../..
+
+TEST=$1
+TEST_DIR="$(realpath ".ci/compose/${TEST}")"
+TYPE=${2:-python}
+GENERATOR_DIR=${3:-../pulp-openapi-generator}
+
+pushd ${GENERATOR_DIR}
+
+./gen-client.sh "${TEST_DIR}/core-api.json" "core" ${TYPE} "pulpcore"
+
+pushd pulpcore-client
+if [ "$TYPE" = "python" ]; then
+    python -m build
+    twine check dist/*
+    cp dist/* "${TEST_DIR}/"
+elif [ "$TYPE" = "ruby" ]; then
+    gem build pulpcore_client
+    cp "./pulpcore_client-"*".gem" "${TEST_DIR}/"
+else
+    echo "Invalid type: $TYPE"
+    exit 1
+fi
+popd
+
+./gen-client.sh "${TEST_DIR}/file-api.json" "file" ${TYPE} "pulp_file"
+
+pushd pulp_file-client
+if [ "$TYPE" = "python" ]; then
+    python -m build
+    twine check dist/*
+    cp dist/* "${TEST_DIR}/"
+elif [ "$TYPE" = "ruby" ]; then
+    gem build pulp_file_client
+    cp "./pulp_file_client-"*".gem" "${TEST_DIR}/"
+else
+    echo "Invalid type: $TYPE"
+    exit 1
+fi
+popd
+
+./gen-client.sh "${TEST_DIR}/certguard-api.json" "certguard" ${TYPE} "pulp_certguard"
+
+pushd pulp_certguard-client
+if [ "$TYPE" = "python" ]; then
+    python -m build
+    twine check dist/*
+    cp dist/* "${TEST_DIR}/"
+elif [ "$TYPE" = "ruby" ]; then
+    gem build pulp_certguard_client
+    cp "./pulp_certguard_client-"*".gem" "${TEST_DIR}/"
+else
+    echo "Invalid type: $TYPE"
+    exit 1
+fi
+popd
+
+{%- for plugin in plugins if plugin.app_label not in ["core", "file", "certguard"] %}
+./gen-client.sh "${TEST_DIR}/{{ plugin.app_label }}-api.json" "{{ plugin.app_label }}" ${TYPE} "{{ plugin.name | snake }}"
+
+pushd {{ plugin.name | snake }}-client
+if [ "$TYPE" = "python" ]; then
+    python -m build
+    twine check dist/*
+    cp dist/* "${TEST_DIR}/"
+elif [ "$TYPE" = "ruby" ]; then
+    gem build {{ plugin.name | snake }}_client
+    cp "./{{ plugin.name | snake }}_client-"*".gem" "${TEST_DIR}/"
+else
+    echo "Invalid type: $TYPE"
+    exit 1
+fi
+popd
+{%- endfor %}
+
+popd
